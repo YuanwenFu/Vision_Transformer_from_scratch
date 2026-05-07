@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 
 
 def read_split_data(root: str, val_rate: float = 0.2):
+    """
+    此函数用于扫描数据集目录，按比例划分训练集和验证集。
+    """
+
     random.seed(0)  # 保证随机结果可复现
     assert os.path.exists(root), "dataset root: {} does not exist.".format(root)
 
@@ -21,6 +25,8 @@ def read_split_data(root: str, val_rate: float = 0.2):
     # 生成类别名称以及对应的数字索引
     class_indices = dict((k, v) for v, k in enumerate(flower_class))
     json_str = json.dumps(dict((val, key) for key, val in class_indices.items()), indent=4)
+    #{'0': 'apple', '1': 'banana', '2': 'orange'}
+
     with open('class_indices.json', 'w') as json_file:
         json_file.write(json_str)
 
@@ -80,6 +86,9 @@ def read_split_data(root: str, val_rate: float = 0.2):
 
 
 def plot_data_loader_image(data_loader):
+    """
+    此函数用于可视化DataLoader中一个batch的图片，验证数据预处理是否正确
+    """
     batch_size = data_loader.batch_size
     plot_num = min(batch_size, 4)
 
@@ -105,53 +114,67 @@ def plot_data_loader_image(data_loader):
 
 
 def write_pickle(list_info: list, file_name: str):
+    """
+    这个函数将Python对象序列化后写入二进制文件，用的是pickle模块。
+    """
     with open(file_name, 'wb') as f:
         pickle.dump(list_info, f)
 
 
 def read_pickle(file_name: str) -> list:
+    """
+    这个函数将二进制文件反序列化还原为Python对象。
+    """
     with open(file_name, 'rb') as f:
         info_list = pickle.load(f)
         return info_list
 
 
 def train_one_epoch(model, optimizer, data_loader, device, epoch):
-    model.train()
+    """
+    这个函数完成PyTorch单轮训练循环
+    """
+    model.train()  #启用训练模式（dropout、BN生效）
     loss_function = torch.nn.CrossEntropyLoss()
     accu_loss = torch.zeros(1).to(device)  # 累计损失
     accu_num = torch.zeros(1).to(device)   # 累计预测正确的样本数
-    optimizer.zero_grad()
+    optimizer.zero_grad()  #清空梯度
 
-    sample_num = 0
+    sample_num = 0 #已处理的总样本数
     data_loader = tqdm(data_loader, file=sys.stdout)
     for step, data in enumerate(data_loader):
         images, labels = data
         sample_num += images.shape[0]
 
-        pred = model(images.to(device))
-        pred_classes = torch.max(pred, dim=1)[1]
-        accu_num += torch.eq(pred_classes, labels.to(device)).sum()
+        pred = model(images.to(device))  #输出形状(B,num_classes)
+        pred_classes = torch.max(pred, dim=1)[1]  #取每行最大值的索引，即预测类别
+        accu_num += torch.eq(pred_classes, labels.to(device)).sum()  #统计预测正确数
 
-        loss = loss_function(pred, labels.to(device))
-        loss.backward()
-        accu_loss += loss.detach()
+        loss = loss_function(pred, labels.to(device))  #计算损失
+        loss.backward()  #反向传播
+        accu_loss += loss.detach() #detach防止保留计算图，只取数值
 
+        #进度条更新
         data_loader.desc = "[train epoch {}] loss: {:.3f}, acc: {:.3f}".format(epoch,
-                                                                               accu_loss.item() / (step + 1),
-                                                                               accu_num.item() / sample_num)
-
+                                                                               accu_loss.item() / (step + 1),  #当前平均loss
+                                                                               accu_num.item() / sample_num)   #当前平均acc
+        #检测loss是否为nan或者inf，出现则立即终止，避免无效训练浪费时间
         if not torch.isfinite(loss):
             print('WARNING: non-finite loss, ending training ', loss)
             sys.exit(1)
 
-        optimizer.step()
-        optimizer.zero_grad()
+        optimizer.step()  #参数更新
+        optimizer.zero_grad()  #清空梯度，准备下一个step
 
-    return accu_loss.item() / (step + 1), accu_num.item() / sample_num
+    return accu_loss.item() / (step + 1), accu_num.item() / sample_num #整轮平均loss,整轮平均accuracy
 
 
 @torch.no_grad()
 def evaluate(model, data_loader, device, epoch):
+    """
+    此函数用于推理验证集
+    """
+
     loss_function = torch.nn.CrossEntropyLoss()
 
     model.eval()
@@ -176,4 +199,4 @@ def evaluate(model, data_loader, device, epoch):
                                                                                accu_loss.item() / (step + 1),
                                                                                accu_num.item() / sample_num)
 
-    return accu_loss.item() / (step + 1), accu_num.item() / sample_num
+    return accu_loss.item() / (step + 1), accu_num.item() / sample_num   #整个验证集上的平均loss和平均accuracy

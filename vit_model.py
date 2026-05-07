@@ -17,11 +17,15 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
     See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
     changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
     'survival rate' as the argument.
+
+    在样本维度做丢弃，不作用于普通层，仅仅作用于残差连接。
     """
     if drop_prob == 0. or not training:
         return x
     keep_prob = 1 - drop_prob
     shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    #shape = (batch_size, 1, 1, ..., 1)
+
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()  # binarize
     output = x.div(keep_prob) * random_tensor
@@ -50,10 +54,13 @@ class PatchEmbed(nn.Module):
         patch_size = (patch_size, patch_size)
         self.img_size = img_size
         self.patch_size = patch_size
-        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
-        self.num_patches = self.grid_size[0] * self.grid_size[1]
+        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1]) #(14,14)
+        self.num_patches = self.grid_size[0] * self.grid_size[1] #196
 
         self.proj = nn.Conv2d(in_c, embed_dim, kernel_size=patch_size, stride=patch_size)
+        #input_channel=3
+        #output_dim=768
+
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
@@ -64,6 +71,12 @@ class PatchEmbed(nn.Module):
         # flatten: [B, C, H, W] -> [B, C, HW]
         # transpose: [B, C, HW] -> [B, HW, C]
         x = self.proj(x).flatten(2).transpose(1, 2)
+        #x：(B,3,224,224)
+        #(1)self.proj(x), (B,768,14,14)
+        #(2).flatten(2), (B,768,196)
+        #(3).transpose(1,2), (B,196,768)
+        #符合transformer期望的输入格式，(B,seq_len,embed_dim),seq_len表示序列长度，embed_dim表示token的特征维度
+
         x = self.norm(x)
         return x
 
@@ -156,7 +169,7 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop_ratio)
 
     def forward(self, x):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.attn(self.norm1(x))) #drop_path作用在残差连接
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -245,7 +258,7 @@ class VisionTransformer(nn.Module):
         if self.dist_token is None:
             x = torch.cat((cls_token, x), dim=1)  # [B, 197, 768]
         else:
-            x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
+            x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1) #[B, 198, 768]
 
         x = self.pos_drop(x + self.pos_embed)
         x = self.blocks(x)
@@ -259,13 +272,17 @@ class VisionTransformer(nn.Module):
         x = self.forward_features(x)
         if self.head_dist is not None:
             x, x_dist = self.head(x[0]), self.head_dist(x[1])
+            #x[0]是cls_token的输出，经过head得到分类预测。
+            #x[1]是dist_token的输出，经过head_dist得到蒸馏预测
+
             if self.training and not torch.jit.is_scripting():
                 # during inference, return the average of both classifier predictions
-                return x, x_dist
+                return x, x_dist #训练：返回两个独立预测
             else:
-                return (x + x_dist) / 2
+                return (x + x_dist) / 2 #推理：返回平均值
         else:
             x = self.head(x)
+            #只有一个分类头
         return x
 
 
@@ -275,16 +292,19 @@ def _init_vit_weights(m):
     :param m: module
     """
     if isinstance(m, nn.Linear):
-        nn.init.trunc_normal_(m.weight, std=.01)
+        nn.init.trunc_normal_(m.weight, std=.01)  #截断正态分布
         if m.bias is not None:
-            nn.init.zeros_(m.bias)
+            nn.init.zeros_(m.bias)                #偏置置零
+        #截断正态分布会丢弃超过2*sigma的值，避免初始权重过大导致梯度爆炸。std=0.01比较小，让各层初始输出方差接近，训练初期更稳定。
     elif isinstance(m, nn.Conv2d):
-        nn.init.kaiming_normal_(m.weight, mode="fan_out")
+        nn.init.kaiming_normal_(m.weight, mode="fan_out") 
+        #Kaiming初始化，专为ReLU激活设计
+        #mode='fan_out'表示用输出神经元数量计算方差，保证前向传播时各层输出方差一致，防止信号消失或爆炸。
         if m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.LayerNorm):
-        nn.init.zeros_(m.bias)
-        nn.init.ones_(m.weight)
+        nn.init.zeros_(m.bias)   #bias置零
+        nn.init.ones_(m.weight)  #权重矩阵为单位矩阵
 
 
 def vit_base_patch16_224(num_classes: int = 1000):
@@ -293,6 +313,8 @@ def vit_base_patch16_224(num_classes: int = 1000):
     ImageNet-1k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     weights ported from official Google JAX impl:
     链接: https://pan.baidu.com/s/1zqb08naP0RPqqfSXfkB2EA  密码: eu9f
+    
+    直接在ImageNet-1k上用，或作为小数据集微调的起点
     """
     model = VisionTransformer(img_size=224,
                               patch_size=16,
@@ -310,6 +332,8 @@ def vit_base_patch16_224_in21k(num_classes: int = 21843, has_logits: bool = True
     ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     weights ported from official Google JAX impl:
     https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_patch16_224_in21k-e5005f0a.pth
+
+    用21k预训练权重迁移到下游任务，因为见过更多类别，特征表达能力更强
     """
     model = VisionTransformer(img_size=224,
                               patch_size=16,
@@ -327,6 +351,8 @@ def vit_base_patch32_224(num_classes: int = 1000):
     ImageNet-1k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     weights ported from official Google JAX impl:
     链接: https://pan.baidu.com/s/1hCv0U8pQomwAtHBYc4hmZg  密码: s5hl
+
+    patch_size从16变成32
     """
     model = VisionTransformer(img_size=224,
                               patch_size=32,
@@ -344,6 +370,8 @@ def vit_base_patch32_224_in21k(num_classes: int = 21843, has_logits: bool = True
     ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     weights ported from official Google JAX impl:
     https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_patch32_224_in21k-8db57226.pth
+
+    patch_size从16变成32
     """
     model = VisionTransformer(img_size=224,
                               patch_size=32,
@@ -361,6 +389,9 @@ def vit_large_patch16_224(num_classes: int = 1000):
     ImageNet-1k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     weights ported from official Google JAX impl:
     链接: https://pan.baidu.com/s/1cxBgZJJ6qUWPSBNcE4TdRQ  密码: qqt8
+
+    large版本depth从12变成24,embed_dim从768变成1024
+    ImageNet-1k,无pre_logits
     """
     model = VisionTransformer(img_size=224,
                               patch_size=16,
@@ -378,6 +409,9 @@ def vit_large_patch16_224_in21k(num_classes: int = 21843, has_logits: bool = Tru
     ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     weights ported from official Google JAX impl:
     https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_patch16_224_in21k-606da67d.pth
+
+    large版本depth从12变成24,embed_dim从768变成1024
+    ImageNet-21k,有pre_logits(1024->1024)
     """
     model = VisionTransformer(img_size=224,
                               patch_size=16,
@@ -395,6 +429,9 @@ def vit_large_patch32_224_in21k(num_classes: int = 21843, has_logits: bool = Tru
     ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     weights ported from official Google JAX impl:
     https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_patch32_224_in21k-9046d2e7.pth
+
+    large版本depth从12变成24,embed_dim从768变成1024,patch_size从16变成32
+    ImageNet-21k,有pre_logits(1024->1024)
     """
     model = VisionTransformer(img_size=224,
                               patch_size=32,
@@ -411,6 +448,9 @@ def vit_huge_patch14_224_in21k(num_classes: int = 21843, has_logits: bool = True
     ViT-Huge model (ViT-H/14) from original paper (https://arxiv.org/abs/2010.11929).
     ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
     NOTE: converted weights not currently available, too large for github release hosting.
+
+    huge版本patch_size从16变成14,embed_dim从768变成1280,depth从16变成32
+    ImageNet-21k,有pre_logits(1280->1280)
     """
     model = VisionTransformer(img_size=224,
                               patch_size=14,

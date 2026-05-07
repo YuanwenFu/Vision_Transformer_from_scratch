@@ -15,22 +15,26 @@ from utils import read_split_data, train_one_epoch, evaluate
 
 
 def main(args):
+    """
+    完整的训练函数，每轮进行：训练->调整学习率->验证->记录指标->保存权重。
+    """
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
+    #创建权重保存目录
     if os.path.exists("./weights") is False:
         os.makedirs("./weights")
 
-    tb_writer = SummaryWriter()
+    tb_writer = SummaryWriter()  #初始化TensorBoard
 
     train_images_path, train_images_label, val_images_path, val_images_label = read_split_data(args.data_path)
 
     data_transform = {
-        "train": transforms.Compose([transforms.RandomResizedCrop(224),
-                                     transforms.RandomHorizontalFlip(),
+        "train": transforms.Compose([transforms.RandomResizedCrop(224),  #随机裁剪+缩放
+                                     transforms.RandomHorizontalFlip(),  #随机水平翻转
                                      transforms.ToTensor(),
                                      transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]),
-        "val": transforms.Compose([transforms.Resize(256),
-                                   transforms.CenterCrop(224),
+        "val": transforms.Compose([transforms.Resize(256),  #先缩放到256
+                                   transforms.CenterCrop(224),  #再从中心裁剪到224
                                    transforms.ToTensor(),
                                    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])}
 

@@ -10,6 +10,9 @@ from vit_model import vit_base_patch16_224_in21k as create_model
 
 
 def main():
+    """
+    单张图片推理流程，包括读图->预处理->加batch维度->模型推理->softmax->argmax->输出类别+概率
+    """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     data_transform = transforms.Compose(
@@ -26,7 +29,7 @@ def main():
     # [N, C, H, W]
     img = data_transform(img)
     # expand batch dimension
-    img = torch.unsqueeze(img, dim=0)
+    img = torch.unsqueeze(img, dim=0) #(3,244,244)->(1,3,244,244)
 
     # read class_indict
     json_path = './class_indices.json'
@@ -44,8 +47,14 @@ def main():
     with torch.no_grad():
         # predict class
         output = torch.squeeze(model(img.to(device))).cpu()
+        #model(*),(1,3,244,244)->(1.5),5个类别的原始分数
+        #squeeze(*),(1,5)->(5,),去掉batch维度
+
         predict = torch.softmax(output, dim=0)
+        #转为概率
+
         predict_cla = torch.argmax(predict).numpy()
+        #最大概率的类别索引
 
     print_res = "class: {}   prob: {:.3}".format(class_indict[str(predict_cla)],
                                                  predict[predict_cla].numpy())
